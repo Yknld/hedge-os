@@ -1,0 +1,11 @@
+node_modules/
+dist/
+target/
+.DS_Store
+*.tsbuildinfo
+*.log
+.env
+.env.*
+__pycache__/
+*.sqlite*
+*.db

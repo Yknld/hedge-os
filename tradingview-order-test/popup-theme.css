@@ -1,0 +1,22 @@
+:root{color-scheme:dark;--canvas:#090909;--surface:#141414;--raised:#202020;--line:#303030;--text:#ededed;--muted:#a0a0a0;--green:#63d8ae;--amber:#e7ba64;--red:#ff94a5;--shine:#ffffff08}
+:root[data-theme="ivory"]{color-scheme:light;--canvas:#eeeae1;--surface:#fffdf8;--raised:#f3eee5;--line:#d5cec2;--text:#292722;--muted:#686157;--green:#087452;--amber:#8b580c;--red:#b32743;--shine:#ffffffb0}
+body{width:410px;font-size:13px;background:var(--canvas)}
+header{height:66px;padding:0 18px;background:linear-gradient(135deg,var(--raised),var(--surface))}
+h1{font-size:12px;letter-spacing:.09em}
+.header-actions{gap:10px}.version{font-size:10px}
+.refresh{font:500 10px/1.4 ui-sans-serif,system-ui,sans-serif;letter-spacing:.03em;border-radius:6px;padding:6px 9px;color:var(--text);background:var(--shine);transition:background .15s,border-color .15s}
+.refresh:hover{background:var(--raised);border-color:var(--muted);color:var(--text)}
+button:focus-visible{outline:2px solid var(--text);outline-offset:3px}
+main{padding:16px}
+.summary,section{border-radius:10px;background:linear-gradient(145deg,var(--surface),var(--raised));box-shadow:inset 0 1px var(--shine);overflow:hidden}
+.summary{padding:14px}.summary strong{font-size:13px}.summary span:last-child{font-size:8px;letter-spacing:.08em}
+section{margin-top:14px}.section-head{padding:13px 14px;background:var(--shine)}
+h2{font-size:10px;letter-spacing:.12em;color:var(--muted)}.count{font-size:10px}
+.row{padding:14px;min-height:76px;gap:10px;border-color:var(--line);align-items:start}
+.row>.dot{margin-top:5px}.primary{font-size:13px;letter-spacing:-.01em}
+.secondary{white-space:normal;overflow:visible;font:10px/1.6 ui-sans-serif,system-ui,sans-serif;margin-top:4px;color:var(--muted)}
+.badge{border-radius:5px;font-size:9px;padding:4px 6px;background:var(--shine)}
+.badge.ready{color:var(--green);border-color:color-mix(in srgb,var(--green) 30%,transparent);background:color-mix(in srgb,var(--green) 8%,transparent)}
+.empty{padding:20px 14px;font-size:12px}
+#error{border-radius:8px;color:var(--red);border-color:color-mix(in srgb,var(--red) 30%,transparent);background:color-mix(in srgb,var(--red) 8%,var(--surface));padding:12px;font-size:11px;line-height:1.6}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}

@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "TradingView Local Execution Bridge",
+  "version": "1.10.81",
+  "description": "Route local desktop-app orders through TradingView and an explicitly bound Ironbeam web session.",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabs", "storage", "power"],
+  "host_permissions": ["https://*.tradingview.com/chart/*", "https://trade.ironbeam.com/*", "https://trading.certigo.com/*", "https://certigo.app/*"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "TradingView Bridge",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:8765"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.tradingview.com/chart/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://trade.ironbeam.com/*", "https://trading.certigo.com/*", "https://certigo.app/*"],
+      "js": ["ironbeam-mqtt.js", "ironbeam-page.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://trade.ironbeam.com/*", "https://trading.certigo.com/*", "https://certigo.app/*"],
+      "js": ["ironbeam-mqtt.js", "ironbeam-content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
