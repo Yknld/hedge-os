@@ -31,6 +31,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMarketFallback } from '../lib/useMarketFallback';
 import { Navigate } from 'react-router-dom';
 import {
   CandlestickSeries,
@@ -653,6 +654,7 @@ function ChartWorkspace() {
   const [liveMinuteBars,setLiveMinuteBars]=useState<LiveMinuteBar[]>(loadLiveMinuteBars);
   const [historicalBars,setHistoricalBars]=useState<MnqBar[]>([]);
   const [liveBridge,setLiveBridge]=useState<TradingViewBridgeState>({relayConnected:false,extensionConnected:false,tradingViewReady:false,tradingViewSymbol:null,lastMessage:'Bridge disconnected'});
+  const marketFallback = useMarketFallback(liveBridge.extensionConnected);
   const [cancelSending, setCancelSending] = useState(false);
   const [showOrderLockNotice, setShowOrderLockNotice] = useState(
     () => localStorage.getItem('hedge-os:hide-order-lock-notice') !== 'true'
@@ -996,20 +998,30 @@ function ChartWorkspace() {
   }, [timeframe]);
 
   useEffect(()=>{
-    if(!candlesRef.current||!historicalBars.length)return;
+    if(!candlesRef.current||(!historicalBars.length&&!marketFallback.bars.length))return;
     // Live TradingView bars always win on a shared timestamp. Rebuilding the
     // ordered set avoids discarding a quote simply because a cached fixture or
     // an older saved bar has a later timestamp.
     const merged=new Map<number,MnqBar>();
-    for(const bar of historicalBars)merged.set(Number(bar.time),bar);
-    for(const bar of aggregateBars(chartBars(liveMinuteBars),timeframe))merged.set(Number(bar.time),bar);
+    if(!marketFallback.bars.length)for(const bar of historicalBars)merged.set(Number(bar.time),bar);
+    // Provider history repairs completed minutes, even while the extension is connected.
+    // Only admit its current candle after a continuous 20-second disconnection.
+    const currentMinute=Math.floor(Date.now()/60000)*60;
+    const providerBars=marketFallback.bars.filter(bar=>bar.time<currentMinute || marketFallback.fallback)
+      .map(bar=>({...bar,time:bar.time as UTCTimestamp,volume:0}));
+    const minutes=new Map<number,MnqBar>(providerBars.map(bar=>[Number(bar.time),bar]));
+    for(const bar of chartBars(liveMinuteBars)) {
+      if(providerBars.length && Number(bar.time)<Number(providerBars[0].time))continue;
+      if(!minutes.has(Number(bar.time)) || (Number(bar.time)>=currentMinute && !marketFallback.fallback))minutes.set(Number(bar.time),bar);
+    }
+    for(const bar of aggregateBars([...minutes.values()].sort((a,b)=>Number(a.time)-Number(b.time)),timeframe))merged.set(Number(bar.time),bar);
     const data=[...merged.values()].sort((a,b)=>Number(a.time)-Number(b.time));
     const previousLast=Number(chartDataRef.current.at(-1)?.time??0);
     chartDataRef.current=data;candlesRef.current.setData(data);setLatest(data.at(-1)??null);
     emaSeriesRef.current.forEach((series,id)=>{const overlay=emaOverlays.find(item=>item.id===id);if(overlay)series.setData(calculateEma(data,overlay.period));});
     if(displayedTimeframeRef.current!==timeframe){displayedTimeframeRef.current=timeframe;chartRef.current?.timeScale().setVisibleLogicalRange({from:Math.max(0,data.length-initialVisibleBars[timeframe]),to:data.length+3});}
     else if(Number(data.at(-1)?.time??0)>previousLast)chartRef.current?.timeScale().scrollToRealTime();
-  },[historicalBars,liveMinuteBars,timeframe,emaOverlays]);
+  },[historicalBars,liveMinuteBars,timeframe,emaOverlays,marketFallback.bars,marketFallback.fallback]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1503,6 +1515,9 @@ function ChartWorkspace() {
           )}
         </div>
         <div className="flex items-center gap-1">
+          <span className="text-[10px] text-slate-400" title="LSE NQ.F is a Nasdaq futures chart feed, not an expiry-specific MNQ execution quote. Orders continue using broker quotes.">
+            {marketFallback.fallback ? `LSE NQ · ${marketFallback.status}` : 'Extension'}{marketFallback.bars.length ? ' · LSE history' : ''}
+          </span>
           <span
             className={cn('mr-2 font-mono text-xs', positive ? 'text-positive' : 'text-negative')}
           >
@@ -1794,7 +1809,8 @@ function ChartWorkspace() {
         </div>
       )}
       <div className="pointer-events-none absolute bottom-7 left-3 border border-line bg-surface px-2 py-1 text-[8px] uppercase tracking-[0.14em] text-slate-600">
-        Historical Nasdaq-100 proxy · {timeframe === '1m' ? 'Aug 25–26' : 'May 17–Aug 26'}, 2026
+        {marketFallback.bars.length ? 'London Strategic Edge · NQ.F · recent futures history · chart only'
+          : `Historical Nasdaq-100 proxy · ${timeframe === '1m' ? 'Aug 25–26' : 'May 17–Aug 26'}, 2026`}
       </div>
     </section>
   );

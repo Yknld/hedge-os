@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "market:relay": "node --env-file=.env.local server/marketDataRelay.mjs",
+    "test:market": "node --import tsx --test tests/marketData.test.mjs tests/marketFallbackPolicy.test.ts",
+    "relay": "tsx server/startRelay.ts",
     "test:planner": "tsx --tsconfig tsconfig.app.json --test tests/campaignPlanner.test.tsx",
     "test:engine": "node --import tsx --test tests/campaignEngine.test.ts",
     "test:contracts": "node --import tsx --test tests/contracts.test.ts",

@@ -4,7 +4,8 @@
   window.__ironbeamContentLoaded=true;
   const LOG='[Ironbeam]';
   const buildMqttPublish=globalThis.IronbeamMqtt?.buildMqttPublish||((topic,payload)=>{
-    const encoder=new TextEncoder(),topicBytes=encoder.encode(topic),payloadBytes=encoder.encode(JSON.stringify(payload));
+    const json=JSON.stringify(payload,(key,value)=>['SOE_ID','STRATEGY_ID'].includes(key)&&/^\d+$/.test(String(value))?`__HEDGE_ID_${value}__`:value).replace(/"__HEDGE_ID_(\d+)__"/g,'$1');
+    const encoder=new TextEncoder(),topicBytes=encoder.encode(topic),payloadBytes=encoder.encode(json);
     const remaining=2+topicBytes.length+payloadBytes.length,remainingBytes=[];let value=remaining;
     do{let digit=value%128;value=Math.floor(value/128);if(value>0)digit|=128;remainingBytes.push(digit);}while(value>0);
     const packet=new Uint8Array(1+remainingBytes.length+remaining);let offset=0;packet[offset++]=0x30;packet.set(remainingBytes,offset);offset+=remainingBytes.length;
@@ -64,7 +65,7 @@
     if(payload.MESSAGE==='HEARTBEAT')return;
     inboundSequence+=1;
     state.lastServerMessage=payload;
-    if(typeof payload.ACCOUNT==='string'&&payload.ACCOUNT)state.account=payload.ACCOUNT;
+    detectSelectedAccount();
     if(payload.MESSAGE==='STRATEGY_ORDER_ENTRY_UPDATE'){
       // Persist the broker's complete SOE acknowledgement (especially a
       // rejected submit).  The order-event feed can arrive later and only
@@ -102,7 +103,7 @@
     update({activeStrategyIds:[],currentSoeId:null,currentStrategyId:null,execution:'IDLE',error:null});
     sendRuntimeMessage({type:'IRONBEAM_EVENT',event:{provider:'ironbeam',type:'broker_snapshot_reset',status:'POSITION_CACHE_INVALIDATED',reason,observedAt:Date.now()}}).catch(()=>{});
   }
-  function trackPositions(payload){const positions=netPositionUpdates(payload);if(!positions.length)return;positionsFreshAfterReset=true;positionsSnapshotSource='broker_positions_stream';positionsSnapshotAt=Date.now();for(const position of positions){const observedAt=Date.now(),next={...position,observedAt},key=`${position.account}|${position.symbol}`;livePositions.set(key,next);sendRuntimeMessage({type:'IRONBEAM_EVENT',event:{provider:'ironbeam',type:'position_state',...next}}).catch(()=>{});}}
+  function trackPositions(payload){const positions=netPositionUpdates(payload).filter(position=>position.account===state.account);if(!positions.length)return;positionsFreshAfterReset=true;positionsSnapshotSource='broker_positions_stream';positionsSnapshotAt=Date.now();for(const position of positions){const observedAt=Date.now(),next={...position,observedAt},key=`${position.account}|${position.symbol}`;livePositions.set(key,next);sendRuntimeMessage({type:'IRONBEAM_EVENT',event:{provider:'ironbeam',type:'position_state',...next}}).catch(()=>{});}}
   function trackOrderEvent(payload){
     if(!['SUBSCRIBE_ORDER_EVENT_UPDATE','SUBSCRIBE_STRATEGY_NEVENTS_UPDATE','SUBSCRIBE_POSITIONS_UPDATE','STOP_STRATEGY_REPLY'].includes(payload.MESSAGE))return;
     const sources=Array.isArray(payload.ORDER_EVENTS)?payload.ORDER_EVENTS:Array.isArray(payload.POSITIONS)?payload.POSITIONS:[payload.ORDER_EVENT||payload.ORDER||payload.POSITION||payload];
@@ -140,6 +141,15 @@
   }
   const visible=(element)=>{if(!(element instanceof Element))return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const text=(element)=>(element?.textContent||'').replace(/\s+/g,' ').trim();
+  function detectSelectedAccount(){
+    const accounts=[...new Set([...document.querySelectorAll('span,div,button,a')].filter(visible).map(text).map(value=>value.match(/^(\d+)\s*\((?:LIVE|DEMO)\)$/i)?.[1]).filter(Boolean))];
+    if(accounts.length!==1)return;
+    const account=accounts[0];
+    if(account===state.account)return;
+    rejectWaiters('IRONBEAM_ACCOUNT_CHANGED');
+    invalidateBrokerPositionCache('ACCOUNT_CHANGED');
+    update({account,accountBalance:null,accountBalanceUpdatedAt:null,marketQuote:null});
+  }
   function detectDomAccountBalance(){
     const candidates=[...document.querySelectorAll('span,div')].filter(visible).flatMap(element=>{
       if(element.children.length)return [];
@@ -166,6 +176,7 @@
     return true;
   }
   function detectDomSymbol(){
+    detectSelectedAccount();
     const contract=/^[A-Z]{1,6}\.[FGHJKMNQUVXZ]\d{2}$/;
     const values=[...document.querySelectorAll('input')].filter(visible).map(input=>String(input.value||'').trim().toUpperCase()).filter(value=>contract.test(value));
     const unique=[...new Set(values)];const detected=unique.length===1?`XCME:${unique[0]}`:null;state.detectedSymbol=detected;return detected;
@@ -196,10 +207,11 @@
 
   function announceDetectedContract(){
     const symbol=String(state.detectedSymbol||'').trim().toUpperCase();
-    if(!symbol||symbol===announcedContract||announcementPending)return;
+    const identity=`${symbol}|${state.account||''}`;
+    if(!symbol||!state.account||identity===announcedContract||announcementPending)return;
     announcementPending=true;
     sendRuntimeMessage({type:'IRONBEAM_AUTO_DETECTED',symbol,account:state.account||null})
-      .then(result=>{if(result?.ok||String(result?.error||'').startsWith('IRONBEAM_BOUND_CONTRACT_CHANGED'))announcedContract=symbol;})
+      .then(result=>{if(result?.ok||String(result?.error||'').startsWith('IRONBEAM_BOUND_CONTRACT_CHANGED'))announcedContract=identity;})
       .catch(()=>{})
       .finally(()=>{announcementPending=false;});
   }
@@ -331,21 +343,28 @@
     }catch(error){update({execution:'ERROR',error:String(error?.message||error)});throw error;}
   }
   async function cancelIronbeamStrategy(strategyId){
+    strategyId=String(strategyId??'').trim();
     if(!positiveId(strategyId))throw new Error('INVALID_IRONBEAM_STRATEGY_ID');
     update({execution:'CANCELING',error:null});
     try{const mid=nextMid();const replyPromise=waitForMessage(payload=>payload?.MESSAGE==='STOP_STRATEGY_REPLY'&&Number(payload.MID_REF)===mid&&sameId(rawId(payload,'STRATEGY_ID'),strategyId),15000,'STRATEGY_CANCEL');
-      await sendPacket({STRATEGY_ID:String(strategyId),MESSAGE:'STOP_STRATEGY',STRATEGY_STATUS:12,MID:mid});
+      const numericId=Number(strategyId);
+      // The broker requires a JSON number. Keep strings in tracking maps,
+      // but use a native number on the wire whenever conversion is exact.
+      // Larger IDs use the MQTT encoder's raw-integer serialization.
+      const wireId=Number.isSafeInteger(numericId)?numericId:strategyId;
+      await sendPacket({STRATEGY_ID:wireId,MESSAGE:'STOP_STRATEGY',STRATEGY_STATUS:12,MID:mid});
       const reply=await replyPromise;
+      sendRuntimeMessage({type:'IRONBEAM_EVENT',event:{provider:'ironbeam',type:'execution_audit',category:'broker_response',action:'STOP_STRATEGY_REPLY',strategyId,observedAt:Date.now(),details:{response:reply}}}).catch(()=>{});
       if(Number(reply.STRATEGY_RESULT)!==1)throw new Error(`IRONBEAM_CANCEL_REJECTED:${JSON.stringify(reply)}`);
       const active=new Set(state.activeStrategyIds);active.delete(String(strategyId));update({execution:'CANCELED',activeStrategyIds:[...active],error:null,lastServerMessage:reply});
-      strategyStates.set(Number(strategyId),'CANCELED');
-      return {success:true,strategyId:Number(strategyId),serverResponse:reply};}
+      strategyStates.set(strategyId,'CANCELED');
+      return {success:true,strategyId,serverResponse:reply};}
     catch(error){update({execution:'ERROR',error:String(error?.message||error)});throw error;}
   }
   const TERMINAL_STRATEGY_STATES=new Set(['FILLED','CANCELED','REJECTED','COMPLETE']);
   async function cancelAllIronbeamStrategies(){
     if(!state.socketReady||!state.outboundTopic)throw new Error('IRONBEAM_SOCKET_OR_TOPIC_UNAVAILABLE');
-    const ids=[...new Set(state.activeStrategyIds.map(Number).filter(Number.isFinite))].filter(id=>!TERMINAL_STRATEGY_STATES.has(strategyStates.get(id)));
+    const ids=[...new Set(state.activeStrategyIds.map(id=>String(id).trim()).filter(positiveId))].filter(id=>!TERMINAL_STRATEGY_STATES.has(strategyStates.get(id)));
     console.log(LOG,`Cancel All targeting ${ids.length} unique active strateg${ids.length===1?'y':'ies'}`);
     const results=await Promise.all(ids.map(async strategyId=>{
       const before=strategyStates.get(strategyId);if(TERMINAL_STRATEGY_STATES.has(before))return {strategyId,ok:true,skipped:true,terminalState:before};
@@ -381,7 +400,7 @@
     else if(message?.action==='PLACE_IRONBEAM_BRACKET')operation=placeIronbeamBracket(message.order||message);
     else if(message?.action==='PLACE_IRONBEAM_MARKETABLE_LIMIT')operation=placeIronbeamMarketableLimit(message.order||message);
     else if(message?.action==='CANCEL_IRONBEAM_STRATEGY')operation=cancelIronbeamStrategy(String(message.strategyId));
-    else if(message?.action==='CANCEL_ALL_IRONBEAM_STRATEGIES')operation=cancelAllIronbeamStrategies().then(result=>({success:true,...result}));
+    else if(message?.action==='CANCEL_ALL_IRONBEAM_STRATEGIES')operation=cancelAllIronbeamStrategies().then(result=>({...result,success:result.ok,error:result.ok?undefined:'IRONBEAM_CANCEL_INCOMPLETE'}));
     else if(message?.action==='EXIT_CANCEL_IRONBEAM')operation=exitCancelIronbeam().then(result=>({success:true,...result}));
     else return false;
     operation.then(sendResponse).catch(error=>sendResponse({success:false,error:String(error?.message||error),state:normalized()}));return true;

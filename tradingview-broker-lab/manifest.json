@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "TradingView Broker Interface Lab",
+  "version": "0.9.2",
+  "description": "Read-only discovery of TradingView broker interfaces. No order execution.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.tradingview.com/chart/*"
+      ],
+      "js": [
+        "probe.js",
+        "broker-reader.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.tradingview.com/chart/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

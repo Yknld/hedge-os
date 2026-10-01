@@ -4,6 +4,7 @@
   window.__ironbeamSocketHookInstalled=true;
   const TARGET='wss://wss.certigo.com/mqtt',NativeWebSocket=window.WebSocket,mqtt=window.IronbeamMqtt;
   let activeSocket=null,outboundTopic=null,inboundTopic=null;
+  const retiredSockets=new WeakSet();
   const emit=(type,detail={})=>window.dispatchEvent(new CustomEvent(`hedge-os:ironbeam:${type}`,{detail}));
   const inspect=(data,direction)=>{
     try{
@@ -22,14 +23,23 @@
     }catch(error){emit('diagnostic',{code:'MQTT_DECODE_FAILED',message:String(error?.message||error)});}
   };
   const observeData=(data,direction,ws)=>{
-    if(ws!==activeSocket)return;
+    if(ws!==activeSocket){
+      // Discover the broker connection by its MQTT application protocol, not
+      // one environment-specific URL. Other sockets remain untouched.
+      if(retiredSockets.has(ws)||ws.readyState!==NativeWebSocket.OPEN||direction!=='outbound')return;
+      try{
+        const decoded=mqtt.decodeMqttPublish(data);
+        if(!decoded?.topic?.startsWith('SERVER/')||typeof decoded.payloadObject?.MESSAGE!=='string')return;
+        if(activeSocket)retiredSockets.add(activeSocket);
+        activeSocket=ws;outboundTopic=null;inboundTopic=null;
+      }catch(_){return;}
+    }
     if(data instanceof Blob)data.arrayBuffer().then(value=>{if(ws===activeSocket)inspect(value,direction);}).catch(()=>{});
     else inspect(data,direction);
   };
   function WrappedWebSocket(...args){
     const ws=new NativeWebSocket(...args);
-    if(String(ws.url)!==TARGET)return ws;
-    activeSocket=ws;outboundTopic=null;inboundTopic=null;emit('status',{socketReady:ws.readyState===NativeWebSocket.OPEN,outboundTopic,inboundTopic});
+    if(String(ws.url)===TARGET){if(activeSocket)retiredSockets.add(activeSocket);activeSocket=ws;outboundTopic=null;inboundTopic=null;emit('status',{socketReady:ws.readyState===NativeWebSocket.OPEN,outboundTopic,inboundTopic});}
     const nativeSend=ws.send.bind(ws);
     ws.send=(data)=>{const result=nativeSend(data);if(ws.readyState===NativeWebSocket.OPEN)observeData(data,'outbound',ws);return result;};
     ws.addEventListener('open',()=>{if(activeSocket===ws)emit('status',{socketReady:true,outboundTopic,inboundTopic});});
@@ -44,7 +54,7 @@
   window.addEventListener('hedge-os:ironbeam:send',(event)=>{
     const {requestId,bytes}=event.detail||{};
     if(!requestId)return;
-    if(!activeSocket||activeSocket.url!==TARGET||activeSocket.readyState!==NativeWebSocket.OPEN)
+    if(!activeSocket||!outboundTopic||activeSocket.readyState!==NativeWebSocket.OPEN)
       return emit('send-result',{requestId,ok:false,error:'IRONBEAM_SOCKET_UNAVAILABLE'});
     try{activeSocket.send(Uint8Array.from(bytes||[]));emit('send-result',{requestId,ok:true});}
     catch(error){emit('send-result',{requestId,ok:false,error:String(error?.message||error)});}

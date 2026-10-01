@@ -13,6 +13,15 @@
   const warn = (...args) => console.warn(LOG, ...args);
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function directBrokerCommand(payload, timeoutMs = 12000) {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { window.removeEventListener('hedge-os-direct-result', onResult); reject(new Error('DIRECT_BROKER_TIMEOUT')); }, timeoutMs);
+      const onResult = event => { try { const value = JSON.parse(String(event.detail || '')); if (value.id !== id) return; clearTimeout(timer); window.removeEventListener('hedge-os-direct-result', onResult); if (!value.ok) reject(new Error(value.error || 'DIRECT_BROKER_FAILED')); else resolve(value.data); } catch (_) {} };
+      window.addEventListener('hedge-os-direct-result', onResult);
+      window.dispatchEvent(new CustomEvent('hedge-os-direct-command', { detail: JSON.stringify({ ...payload, id }) }));
+    });
+  }
 
   function isTradingViewChart() {
     return (location.hostname === 'tradingview.com' || location.hostname.endsWith('.tradingview.com')) &&
@@ -755,6 +764,10 @@
     verifyRequestedSymbol(panel, order.symbol);
     const market = readCurrentMarket(panel, order.side);
     const orderType = getOrderType(order.side, order.entryPrice, market.currentPrice);
+    const directType = orderType === 'STOP' ? 3 : 1;
+    const currentContract = readCurrentSymbol(panel)?.displayed || order.symbol;
+    const direct = await directBrokerCommand({ action: 'place', order: { symbol: `CME_MINI:${currentContract}`, side: order.side === 'BUY' ? 1 : -1, qty: order.quantity, type: directType, ...(directType === 3 ? { stopPrice: order.entryPrice } : { limitPrice: order.entryPrice }), takeProfit: order.takeProfit, stopLoss: order.stopLoss } });
+    return { success: true, executionProtocolVersion: EXECUTION_PROTOCOL_VERSION, message: `${order.side} ${orderType} submitted through direct broker`, side: order.side, quantity: order.quantity, entryPrice: order.entryPrice, orderType, takeProfit: order.takeProfit, stopLoss: order.stopLoss, direct };
     log('Order type selected from market relationship', {
       side: order.side,
       entryPrice: order.entryPrice,
@@ -1045,6 +1058,10 @@
   }
 
   async function cancelAllOrders(flatten = false, expectedSymbol = null) {
+    if (expectedSymbol === 'MNQ') {
+      const direct = await directBrokerCommand({ action: 'cancelAll', flatten });
+      return { success: true, message: flatten ? 'Direct broker orders cancelled and positions flattened' : 'Direct broker orders cancelled', direct };
+    }
     log(flatten ? 'Cancel All & Flatten requested' : 'Cancel pending orders requested');
     const panel = await openTradingPanel();
     try {

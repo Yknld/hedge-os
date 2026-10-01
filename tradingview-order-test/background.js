@@ -2,7 +2,7 @@
 
 const LOG = '[TV Bridge]';
 const SOCKET_URL = 'ws://127.0.0.1:8765';
-const VERSION = '1.10.81';
+const VERSION = '1.10.90';
 const REQUIRED_TV_EXECUTION_PROTOCOL_VERSION = 2;
 const HEARTBEAT_MS = 10000;
 const CONNECTION_TIMEOUT_MS = 5000;
@@ -249,6 +249,7 @@ async function getBoundIronbeamTarget(symbol,tabId=null){
   if(!binding)throw new Error(tabId?'IRONBEAM_TAB_NOT_BOUND':'IRONBEAM_SYMBOL_NOT_BOUND');
   const selected=inspected.find(item=>item.tab.id===binding.tabId);
   if(!selected?.status)throw new Error('IRONBEAM_TAB_UNAVAILABLE');
+  if(!selected.status.account||String(selected.status.account)!==String(binding.account))throw new Error('IRONBEAM_ACCOUNT_REBIND_PENDING');
   const currentContract=selected.status.detectedSymbol;if(!currentContract)throw new Error('IRONBEAM_CURRENT_CONTRACT_NOT_DETECTED');
   if(ironbeamRootSymbol(currentContract)!==binding.rootSymbol)throw new Error('IRONBEAM_BOUND_ROOT_MISMATCH');
   if(symbol&&ironbeamRootSymbol(symbol)!==binding.rootSymbol)throw new Error('IRONBEAM_BOUND_SYMBOL_MISMATCH');
@@ -284,9 +285,7 @@ async function armAfterPropFill(message){
   // A small hedge can legitimately round to NNQ-only (for example, 5% of one
   // MNQ). Stage MNQ whenever it exists; otherwise stage that NNQ bracket as
   // the complete hedge instead of rejecting a valid executable mix.
-  const stagedLeg=message.legs.find(leg=>ironbeamRootSymbol(leg.symbol)==='MNQ')||message.legs[0];
-  const stagedRoot=ironbeamRootSymbol(stagedLeg.symbol);
-  const stagedTarget=await getBoundIronbeamTarget(stagedLeg.symbol);
+  const stagedLeg=message.legs.find(leg=>ironbeamRootSymbol(leg.symbol)==='MNQ');
   // Refuse a new arm if the broker still reports exposure on either hedge
   // root. A replacement bracket must never be allowed to turn a prior fill
   // into a second, naked order merely because the UI appears flat.
@@ -306,9 +305,17 @@ async function armAfterPropFill(message){
   }
   const batchId=String(message.id);
   const hedgeEntryOffsetTicks=Math.max(1,Math.min(4,Math.round(Number(message.hedgeEntryOffsetTicks)||1)));
-  const armed={batchId,prop:{symbol:'MNQ',side:String(prop.side).toUpperCase(),quantity:Number(prop.quantity)},legs:message.legs,timeoutMs:Math.max(500,Math.min(10000,Number(message.timeoutMs)||5000)),completionPercent:Math.max(1,Math.min(100,Number(message.completionPercent)||98)),hedgeEntryOffsetTicks,roots,stagedRoot,createdAt:Date.now(),triggered:false,nnqTriggered:false,propOpenSeen:false,actualPropQuantity:0,exitStarted:false,propFlatFirstSeenAt:null,propFlatLastSeenAt:null,propFlatTimer:null,timer:null,exitTimer:null,prePropFillTimer:null,filledByRoot:{},liveByRoot:{},strategyIds:[],strategyByRoot:{},executionTrace:{batchId,prop:{},legs:{}}};
+  const armed={batchId,prop:{symbol:'MNQ',side:String(prop.side).toUpperCase(),quantity:Number(prop.quantity)},legs:message.legs,timeoutMs:Math.max(500,Math.min(10000,Number(message.timeoutMs)||5000)),completionPercent:Math.max(1,Math.min(100,Number(message.completionPercent)||98)),hedgeEntryOffsetTicks,roots,stagedRoot:stagedLeg?ironbeamRootSymbol(stagedLeg.symbol):null,createdAt:Date.now(),triggered:false,nnqTriggered:false,propOpenSeen:false,actualPropQuantity:0,exitStarted:false,propFlatFirstSeenAt:null,propFlatLastSeenAt:null,propFlatTimer:null,timer:null,exitTimer:null,prePropFillTimer:null,filledByRoot:{},liveByRoot:{},strategyIds:[],strategyByRoot:{},executionTrace:{batchId,prop:{},legs:{}}};
   armedPropHedges.set(batchId,armed);
   try{
+    // NNQ-only hedges have no staged broker order. The TradingView prop fill
+    // is the trigger for their fresh-BBO marketable-limit release.
+    if(!stagedLeg){
+      emitHedgeLifecycle(armed,'NNQ_ONLY_WAITING_FOR_PROP_FILL');
+      return {success:true,provider:'ironbeam',batchId,status:'NNQ_ONLY_WAITING_FOR_PROP_FILL',strategyId:null};
+    }
+    const stagedRoot=ironbeamRootSymbol(stagedLeg.symbol);
+    const stagedTarget=await getBoundIronbeamTarget(stagedLeg.symbol);
     // Place the MNQ bracket alongside the prop bracket. A prop stop already
     // supplies the trigger, so its inverse hedge can rest as a price-capped
     // limit. A passive prop limit needs an inverse Stop Limit: its Aux/stop
@@ -347,18 +354,29 @@ async function armAfterPropFill(message){
 
 async function retireArmedHedge(armed,status,extra={}){
   if(!armed)return {success:true,skipped:true};
+  // Retain ownership for cancellation retries, but stop releasing new legs.
+  armed.exitStarted=true;
   if(armed.timer)clearTimeout(armed.timer);
   if(armed.exitTimer)clearTimeout(armed.exitTimer);
   if(armed.prePropFillTimer)clearTimeout(armed.prePropFillTimer);
   if(armed.propFlatTimer)clearTimeout(armed.propFlatTimer);
-  armedPropHedges.delete(armed.batchId);
   // Only strategies acknowledged for this batch are ours to stop.  Never use
   // the account-wide Cancel All command here: it can stop manual work or a
   // subsequent trade that happens to use the same Ironbeam tab.
   const cancellations=await Promise.allSettled(Object.entries(armed.strategyByRoot||{}).map(async([root,strategyId])=>{
     const target=await getBoundIronbeamTarget(root);
-    return chrome.tabs.sendMessage(target.tab.id,{action:'CANCEL_IRONBEAM_STRATEGY',strategyId});
+    const response=await chrome.tabs.sendMessage(target.tab.id,{action:'CANCEL_IRONBEAM_STRATEGY',strategyId});
+    if(!response?.success)throw new Error(`${root}:${response?.error||'IRONBEAM_CANCEL_UNCONFIRMED'}`);
+    delete armed.strategyByRoot[root];
+    return response;
   }));
+  const failures=cancellations.filter(result=>result.status==='rejected');
+  if(failures.length){
+    const error=failures.map(result=>String(result.reason?.message||result.reason)).join('; ');
+    emitHedgeLifecycle(armed,'CANCEL_INCOMPLETE',{...extra,error});
+    throw new Error(`IRONBEAM_CANCEL_INCOMPLETE:${error}`);
+  }
+  armedPropHedges.delete(armed.batchId);
   emitHedgeLifecycle(armed,status,{...extra,cancelledOwnedStrategies:cancellations.map(result=>result.status==='fulfilled'?'ok':String(result.reason?.message||result.reason))});
   return {success:true,cancellations};
 }
@@ -510,6 +528,9 @@ async function observePropFill(armed,actualQuantity,propObservation={}){
   };
   emitExecutionTrace(armed,'T0_T1_PROP_FILL_OBSERVED');
   emitHedgeLifecycle(armed,'PROP_FILLED_OBSERVED',{actualQuantity});
+  if(!armed.legs.some(leg=>ironbeamRootSymbol(leg.symbol)==='MNQ')){
+    releaseNnqAfterMnqFill(armed).catch(error=>handleResidualHedgeReleaseFailure(armed,error));
+  }
 }
 
 async function releaseNnqAfterMnqFill(armed){
@@ -629,7 +650,15 @@ function observePropPosition(position,propObservation={}){
     if(isMnq){
       if(armed.propFlatTimer)clearTimeout(armed.propFlatTimer);
       armed.propFlatTimer=null;armed.propFlatFirstSeenAt=null;armed.propFlatLastSeenAt=null;
-      if(!armed.propOpenSeen&&Number(position.quantity)===Number(armed.prop.quantity)&&((position.side==='LONG')===(armed.prop.side==='BUY')))ironbeamExecutionQueue=ironbeamExecutionQueue.then(()=>observePropFill(armed,Number(position.quantity),{...propObservation,avgPrice:position.avgPrice})).catch(error=>{warn('Prop-fill hedge release failed',error);emergencyFlatten(armed,String(error?.message||error)).catch(()=>{});});
+      // TradingView may publish a partial/normalized quantity while the
+      // position row is already visibly open.  Requiring exact equality here
+      // can strand an NNQ-only hedge forever.  The arm starts flat, so any
+      // positive MNQ position on the armed side is sufficient evidence to
+      // trigger the residual NNQ release; the release scales to the observed
+      // quantity when applicable.
+      const reportedQuantity=Number(position.quantity);
+      const sideMatches=(position.side==='LONG')===(armed.prop.side==='BUY');
+      if(!armed.propOpenSeen&&reportedQuantity>0&&sideMatches)ironbeamExecutionQueue=ironbeamExecutionQueue.then(()=>observePropFill(armed,reportedQuantity,{...propObservation,avgPrice:position.avgPrice})).catch(error=>{warn('Prop-fill hedge release failed',error);emergencyFlatten(armed,String(error?.message||error)).catch(()=>{});});
       continue;
     }
     if(!armed.propOpenSeen||armed.exitStarted)continue;
@@ -753,7 +782,11 @@ function pruneRecentIds() {
 
 function validateOrder(message) {
   if (!message.id || typeof message.id !== 'string') return 'INVALID_ORDER_ID';
-  if (!['NQ', 'MNQ', 'MBT'].includes(String(message.symbol || '').toUpperCase())) return 'UNSUPPORTED_SYMBOL';
+  // The prop leg is deliberately MNQ-only.  NQ/MBT remain valid concepts in
+  // the research UI, but they must never reach the TradingView execution
+  // bridge: a stale chart or legacy command must fail closed instead of
+  // creating an oversized mini-NQ position.
+  if (String(message.symbol || '').toUpperCase() !== 'MNQ') return 'PROP_MNQ_ONLY';
   if (!['BUY', 'SELL'].includes(String(message.side || '').toUpperCase())) return 'INVALID_SIDE';
   for (const field of ['quantity', 'entryPrice', 'takeProfit', 'stopLoss']) {
     if (!Number.isFinite(Number(message[field])) || Number(message[field]) <= 0) return `INVALID_${field.toUpperCase()}`;

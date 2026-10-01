@@ -12,7 +12,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.storage.local.get('appTheme').then(saved => {
   if (!themeRevision) applyTheme(saved.appTheme);
 }).catch(() => applyTheme('charcoal'));
-const el={appDot:document.querySelector('#appDot'),appValue:document.querySelector('#appValue'),refresh:document.querySelector('#refresh'),version:document.querySelector('#version'),tvCount:document.querySelector('#tvCount'),tvTabs:document.querySelector('#tvTabs'),ibCount:document.querySelector('#ibCount'),ibTabs:document.querySelector('#ibTabs'),error:document.querySelector('#error')};
+const el={appDot:document.querySelector('#appDot'),appValue:document.querySelector('#appValue'),version:document.querySelector('#version'),tvCount:document.querySelector('#tvCount'),tvTabs:document.querySelector('#tvTabs'),ibCount:document.querySelector('#ibCount'),ibTabs:document.querySelector('#ibTabs'),error:document.querySelector('#error')};
 const dot=status=>`dot ${status}`;
 const escapeHtml=value=>String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const plural=(count,label)=>`${count} ${label}${count===1?'':'s'}`;
@@ -34,12 +34,12 @@ chrome.runtime.onMessage.addListener(message=>{if(message?.type==='BRIDGE_STATUS
 let refreshing=false;
 function requestStatus(type){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(type+' timed out; refresh the broker tabs.')),6000);chrome.runtime.sendMessage({type}).then(resolve,reject).finally(()=>clearTimeout(timer));});}
 async function refresh(){
-  if(refreshing)return;refreshing=true;el.refresh.disabled=true;el.error.textContent='';
+  if(refreshing)return;refreshing=true;el.error.textContent='';
   try{
     await Promise.allSettled([
       requestStatus('GET_BRIDGE_STATUS').then(render).catch(error=>{el.error.textContent=String(error.message||error);}),
       requestStatus('GET_IRONBEAM_BRIDGE_STATUS').then(renderIronbeam).catch(error=>{el.ibCount.textContent='Unavailable';el.ibTabs.textContent=String(error.message||error);}),
     ]);
-  }finally{refreshing=false;el.refresh.disabled=false;}
+  }finally{refreshing=false;}
 }
-el.refresh.addEventListener('click',refresh);refresh();setInterval(refresh,1000);
+refresh();setInterval(refresh,1000);

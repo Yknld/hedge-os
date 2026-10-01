@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "TradingView Local Execution Bridge",
-  "version": "1.10.81",
+  "version": "1.10.90",
   "description": "Route local desktop-app orders through TradingView and an explicitly bound Ironbeam web session.",
   "minimum_chrome_version": "116",
-  "permissions": ["tabs", "storage", "power"],
+  "permissions": ["tabs", "storage", "power", "scripting"],
   "host_permissions": ["https://*.tradingview.com/chart/*", "https://trade.ironbeam.com/*", "https://trading.certigo.com/*", "https://certigo.app/*"],
   "background": { "service_worker": "background.js" },
   "action": {
@@ -31,6 +31,12 @@
       "matches": ["https://*.tradingview.com/chart/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.tradingview.com/chart/*"],
+      "js": ["broker-reader.js", "direct-bridge.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
     },
     {
       "matches": ["https://trade.ironbeam.com/*", "https://trading.certigo.com/*", "https://certigo.app/*"],
